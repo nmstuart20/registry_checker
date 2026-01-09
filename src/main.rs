@@ -2,16 +2,12 @@ use anyhow::{Context, Result};
 use cargo_metadata::MetadataCommand;
 use clap::Parser;
 use std::collections::HashSet;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs::{self, File};
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(
-    author,
-    version,
-    about = "Finds missing dependencies for offline registry"
-)]
+#[command(author, version, about = "Finds missing dependencies for offline registry")]
 struct Args {
     /// Path to the Cargo.toml of the project you want to check
     #[arg(short, long, default_value = "./Cargo.toml")]
@@ -21,7 +17,7 @@ struct Args {
     #[arg(short, long)]
     registry_file: PathBuf,
 
-    /// Append missing crates directly to the file instead of just printing them
+    /// Add missing crates and sort the file
     #[arg(short, long)]
     write: bool,
 }
@@ -29,70 +25,77 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    // 1. Parse the project dependencies using cargo_metadata
-    // This looks at Cargo.lock to get the EXACT full tree (transitive deps included)
     println!("Scanning project dependencies...");
     let metadata = MetadataCommand::new()
         .manifest_path(&args.manifest_path)
         .exec()
         .context("Failed to run cargo metadata. Is this a valid Rust project?")?;
 
-    // Collect all project dependencies into a set of "name:version" strings
+    // Format dependencies as 'name-version.crate'
     let project_deps: HashSet<String> = metadata
         .packages
         .into_iter()
-        .filter(|p| p.source.is_some()) // Filter out local path dependencies (your own workspaces)
-        .map(|p| format!("{}:{}", p.name, p.version))
+        .filter(|p| p.source.is_some())
+        .map(|p| format!("{}-{}.crate", p.name, p.version))
         .collect();
 
-    // 2. Read the existing registry file
     println!("Reading existing registry file: {:?}", args.registry_file);
-    let file_content =
-        fs::read_to_string(&args.registry_file).context("Could not read registry file")?;
+    let file_content = fs::read_to_string(&args.registry_file)
+        .context("Could not read registry file")?;
 
-    // Store existing entries in a HashSet for O(1) lookups
-    // We trim whitespace to handle different formatting
     let existing_registry: HashSet<String> = file_content
         .lines()
         .map(|line| line.trim().to_string())
         .filter(|line| !line.is_empty())
         .collect();
 
-    // 3. Find missing crates
-    let mut missing_crates: Vec<String> = project_deps
+    // Find what is missing
+    let missing_crates: Vec<String> = project_deps
         .difference(&existing_registry)
         .cloned()
         .collect();
 
     if missing_crates.is_empty() {
-        println!("All dependencies are already in the registry file.");
+        println!("All dependencies are already present in the registry file.");
+        
+        // Optional: You might still want to sort the file even if nothing is missing?
+        // If so, you could move the write logic outside this check.
         return Ok(());
     }
 
-    // Sort for readability
-    missing_crates.sort();
-
+    // Display what we found
+    let mut missing_sorted = missing_crates.clone();
+    missing_sorted.sort();
+    
     println!("Found {} missing crates:", missing_crates.len());
-    for krate in &missing_crates {
+    for krate in &missing_sorted {
         println!("  + {}", krate);
     }
 
-    // 4. Update the file if requested
     if args.write {
-        let mut file = OpenOptions::new()
-            .append(true)
-            .open(&args.registry_file)
-            .context("Failed to open registry file for writing")?;
+        println!("Merging and sorting registry file...");
 
-        for krate in missing_crates {
-            writeln!(file, "{}", krate)?;
+        // 1. Combine existing and missing
+        let mut full_list: Vec<String> = existing_registry
+            .union(&project_deps) // Union handles duplicates automatically
+            .cloned()
+            .collect();
+
+        // 2. Sort the full list
+        full_list.sort();
+
+        // 3. Overwrite the file with the sorted content
+        let file = File::create(&args.registry_file)
+            .context("Failed to open registry file for writing")?;
+        let mut writer = BufWriter::new(file);
+
+        for line in full_list {
+            writeln!(writer, "{}", line)?;
         }
-        println!(
-            "Successfully appended missing crates to {:?}",
-            args.registry_file
-        );
+
+        println!("Successfully updated and sorted {:?}", args.registry_file);
     } else {
-        println!("\n(Run with --write to append these automatically)");
+        println!("\n(Run with --write to add these and sort the file)");
     }
 
     Ok(())
