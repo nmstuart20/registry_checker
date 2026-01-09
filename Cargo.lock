@@ -191,6 +191,7 @@ dependencies = [
  "anyhow",
  "cargo_metadata",
  "clap",
+ "semver",
  "serde",
 ]
 
