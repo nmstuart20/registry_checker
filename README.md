@@ -10,14 +10,6 @@ This tool scans your Rust project's dependencies and compares them against your 
 - **Major version upgrades** (e.g., 1.x.x → 2.0.0) require approval
 - **New dependencies** require approval
 
-## Installation
-
-```bash
-cargo build --release
-```
-
-The binary will be available at `target/release/registry_checker`.
-
 ## Usage
 
 ### Check for missing crates
@@ -60,14 +52,14 @@ registry_checker -r my-registry.txt --write
 Scanning project dependencies...
 Reading existing registry file: "my-registry.txt"
 Found 5 missing crates:
-  + serde-1.0.210.crate [minor/patch upgrade from 1.0.195]
-  + tokio-2.0.0.crate [WARNING: MAJOR version upgrade from 1.41.0, requires approval]
-  + new-crate-0.1.0.crate [WARNING: NEW dependency, requires approval]
+   serde-1.0.210.crate [minor/patch upgrade from 1.0.195]
+   tokio-2.0.0.crate [WARNING: MAJOR version upgrade from 1.41.0, requires approval]
+   new-crate-0.1.0.crate [WARNING: NEW dependency, requires approval]
 
-⚠️  2 crate(s) require approval:
+  2 crate(s) require approval:
    (major version upgrades or new dependencies)
 
-✓  1 crate(s) are minor/patch upgrades (no approval needed)
+  1 crate(s) are minor/patch upgrades (no approval needed)
 
 (Run with --write to add these and sort the file)
 ```

@@ -107,7 +107,7 @@ fn main() -> Result<()> {
                 if new_version.major != latest_existing.major {
                     // Major version upgrade - needs approval
                     println!(
-                        "  + {} [WARNING: MAJOR version upgrade from {}, requires approval]",
+                        "  {} [WARNING: MAJOR version upgrade from {}, requires approval]",
                         krate, latest_existing
                     );
                     needs_approval.push(krate.clone());
@@ -116,22 +116,22 @@ fn main() -> Result<()> {
                 {
                     // Minor or patch version upgrade - OK
                     println!(
-                        "  + {} [minor/patch upgrade from {}]",
+                        "  {} [minor/patch upgrade from {}]",
                         krate, latest_existing
                     );
                     minor_upgrades.push(krate.clone());
                 } else {
                     // Same version? Shouldn't happen, but just in case
-                    println!("  + {}", krate);
+                    println!("  {}", krate);
                 }
             } else {
                 // New dependency - needs approval
-                println!("  + {} [WARNING: NEW dependency, requires approval]", krate);
+                println!("  {} [WARNING: NEW dependency, requires approval]", krate);
                 needs_approval.push(krate.clone());
             }
         } else {
             // Couldn't parse version
-            println!("  + {} [WARNING: Could not parse version]", krate);
+            println!("  {} [WARNING: Could not parse version]", krate);
             needs_approval.push(krate.clone());
         }
     }
