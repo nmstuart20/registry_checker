@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use cargo_metadata::MetadataCommand;
 use clap::Parser;
-use semver::Version;
+use semver::{Version, VersionReq};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
@@ -52,12 +52,24 @@ fn main() -> Result<()> {
         .exec()
         .context("Failed to run cargo metadata. Is this a valid Rust project?")?;
 
-    // Format dependencies as 'name-version.crate'
-    let project_deps: HashSet<String> = metadata
+    // Build a map of dependency names to their version requirements
+    // We collect all version requirements across all packages for each dependency
+    let mut dep_requirements: HashMap<String, Vec<VersionReq>> = HashMap::new();
+    for package in &metadata.packages {
+        for dep in &package.dependencies {
+            dep_requirements
+                .entry(dep.name.clone())
+                .or_default()
+                .push(dep.req.clone());
+        }
+    }
+
+    // Get all external dependencies (from the lock file)
+    let project_deps: HashMap<String, Version> = metadata
         .packages
-        .into_iter()
+        .iter()
         .filter(|p| p.source.is_some())
-        .map(|p| format!("{}-{}.crate", p.name, p.version))
+        .map(|p| (p.name.clone(), p.version.clone()))
         .collect();
 
     println!("Reading existing registry file: {:?}", args.registry_file);
@@ -78,83 +90,132 @@ fn main() -> Result<()> {
         }
     }
 
-    // Find what is missing
-    let missing_crates: Vec<String> = project_deps
-        .difference(&existing_registry)
-        .cloned()
-        .collect();
+    // Find what is truly missing: dependencies where the offline registry
+    // doesn't have ANY version that satisfies the version requirement
+    let mut missing_deps: HashMap<String, Version> = HashMap::new();
 
-    if missing_crates.is_empty() {
-        println!("All dependencies are already present in the registry file.");
+    for (dep_name, lock_version) in &project_deps {
+        // Check if the offline registry has any version that satisfies the requirement
+        let has_satisfying_version = if let Some(requirements) = dep_requirements.get(dep_name) {
+            if let Some(available_versions) = registry_versions.get(dep_name) {
+                // Check if any available version satisfies any of the requirements
+                available_versions.iter().any(|available_version| {
+                    requirements
+                        .iter()
+                        .any(|req| req.matches(available_version))
+                })
+            } else {
+                // No versions of this crate in the registry at all
+                false
+            }
+        } else {
+            // No version requirement found (shouldn't happen, but be safe)
+            // Fall back to checking for exact version
+            registry_versions
+                .get(dep_name)
+                .map(|versions| versions.contains(lock_version))
+                .unwrap_or(false)
+        };
+
+        if !has_satisfying_version {
+            missing_deps.insert(dep_name.clone(), lock_version.clone());
+        }
+    }
+
+    if missing_deps.is_empty() {
+        println!("All dependencies can be satisfied by the offline registry.");
+        println!("(The offline registry has compatible versions for all requirements)");
         return Ok(());
     }
 
     // Display what we found with version analysis
-    let mut missing_sorted = missing_crates.clone();
-    missing_sorted.sort();
+    let mut missing_sorted: Vec<_> = missing_deps.iter().collect();
+    missing_sorted.sort_by_key(|(name, _)| *name);
 
-    println!("Found {} missing crates:", missing_crates.len());
+    println!(
+        "Found {} dependencies that cannot be satisfied by the offline registry:",
+        missing_deps.len()
+    );
 
     let mut needs_approval: Vec<(String, String)> = Vec::new(); // (crate, reason)
     let mut minor_upgrades: Vec<String> = Vec::new();
 
-    for krate in &missing_sorted {
-        if let Some((name, new_version)) = parse_crate_name_version(krate) {
-            if let Some(existing_versions) = registry_versions.get(&name) {
-                // Find the latest existing version
-                let latest_existing = existing_versions.iter().max().unwrap();
+    for (dep_name, needed_version) in &missing_sorted {
+        let crate_file = format!("{}-{}.crate", dep_name, needed_version);
 
-                if new_version < *latest_existing {
-                    // Version downgrade - needs approval
-                    println!(
-                        "  {} [WARNING: DOWNGRADE from {}, requires approval]",
-                        krate, latest_existing
-                    );
-                    needs_approval.push((
-                        krate.clone(),
-                        format!("downgrade from {}", latest_existing),
-                    ));
-                } else if new_version.major != latest_existing.major {
-                    // Major version upgrade - needs approval
-                    println!(
-                        "  {} [WARNING: MAJOR version upgrade from {}, requires approval]",
-                        krate, latest_existing
-                    );
-                    needs_approval.push((
-                        krate.clone(),
-                        format!("major upgrade from {}", latest_existing),
-                    ));
-                } else if new_version.minor != latest_existing.minor
-                    || new_version.patch != latest_existing.patch
-                {
-                    // Minor or patch version upgrade - OK
-                    println!(
-                        "  {} [minor/patch upgrade from {}]",
-                        krate, latest_existing
-                    );
-                    minor_upgrades.push(krate.clone());
-                } else {
-                    // Same version? Shouldn't happen, but just in case
-                    println!("  {}", krate);
-                }
+        if let Some(existing_versions) = registry_versions.get(*dep_name) {
+            // Find the latest existing version
+            let latest_existing = existing_versions.iter().max().unwrap();
+
+            // Get the version requirements for this dependency
+            let requirements = dep_requirements.get(*dep_name);
+            let req_str = requirements
+                .map(|reqs| {
+                    reqs.iter()
+                        .map(|r| r.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" or ")
+                })
+                .unwrap_or_else(|| "unknown".to_string());
+
+            if **needed_version < *latest_existing {
+                // Version downgrade - needs approval
+                println!(
+                    "  {} [WARNING: requires {}, but registry has {}; DOWNGRADE needed, requires approval]",
+                    crate_file, req_str, latest_existing
+                );
+                needs_approval.push((
+                    crate_file.clone(),
+                    format!(
+                        "downgrade needed (has {}, requires {})",
+                        latest_existing, req_str
+                    ),
+                ));
+            } else if needed_version.major != latest_existing.major {
+                // Major version upgrade - needs approval
+                println!(
+                    "  {} [WARNING: requires {}, but registry only has {}; MAJOR upgrade needed, requires approval]",
+                    crate_file, req_str, latest_existing
+                );
+                needs_approval.push((
+                    crate_file.clone(),
+                    format!("major upgrade from {}", latest_existing),
+                ));
+            } else if needed_version.minor != latest_existing.minor
+                || needed_version.patch != latest_existing.patch
+            {
+                // Minor or patch version upgrade - OK to add
+                println!(
+                    "  {} [requires {}, registry has {}; minor/patch upgrade needed]",
+                    crate_file, req_str, latest_existing
+                );
+                minor_upgrades.push(crate_file.clone());
             } else {
-                // New dependency - needs approval
-                println!("  {} [WARNING: NEW dependency, requires approval]", krate);
-                needs_approval.push((krate.clone(), "new dependency".to_string()));
+                // Same version? Shouldn't happen based on our logic, but just in case
+                println!("  {} [requires {}]", crate_file, req_str);
             }
         } else {
-            // Couldn't parse version
-            println!("  {} [WARNING: Could not parse version]", krate);
-            needs_approval.push((krate.clone(), "unable to parse version".to_string()));
+            // New dependency - needs approval
+            let req_str = dep_requirements
+                .get(*dep_name)
+                .map(|reqs| {
+                    reqs.iter()
+                        .map(|r| r.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" or ")
+                })
+                .unwrap_or_else(|| "unknown".to_string());
+            println!(
+                "  {} [WARNING: requires {}; NEW dependency, requires approval]",
+                crate_file, req_str
+            );
+            needs_approval.push((crate_file.clone(), "new dependency".to_string()));
         }
     }
 
     // Summary of what needs approval
     if !needs_approval.is_empty() {
-        println!(
-            "\n {} crate(s) require approval:",
-            needs_approval.len()
-        );
+        println!("\n {} crate(s) require approval:", needs_approval.len());
         println!("   (major version upgrades, downgrades, or new dependencies)");
     }
 
@@ -177,11 +238,17 @@ fn main() -> Result<()> {
     }
 
     if args.write {
-        println!("Merging and sorting registry file...");
+        println!("\nMerging and sorting registry file...");
+
+        // Convert missing deps to crate file format
+        let missing_crate_files: HashSet<String> = missing_deps
+            .iter()
+            .map(|(name, version)| format!("{}-{}.crate", name, version))
+            .collect();
 
         // 1. Combine existing and missing
         let mut full_list: Vec<String> = existing_registry
-            .union(&project_deps) // Union handles duplicates automatically
+            .union(&missing_crate_files)
             .cloned()
             .collect();
 
