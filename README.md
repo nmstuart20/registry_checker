@@ -8,6 +8,7 @@ This tool scans your Rust project's dependencies and compares them against your 
 
 - **Minor/patch version upgrades** (e.g., 1.2.0 → 1.3.0 or 1.2.0 → 1.2.1) can be added without approval
 - **Major version upgrades** (e.g., 1.x.x → 2.0.0) require approval
+- **Version downgrades** (e.g., 2.0.0 → 1.9.0) require approval
 - **New dependencies** require approval
 
 ## Usage
@@ -51,15 +52,24 @@ registry_checker -r my-registry.txt --write
 ```
 Scanning project dependencies...
 Reading existing registry file: "my-registry.txt"
-Found 5 missing crates:
-   serde-1.0.210.crate [minor/patch upgrade from 1.0.195]
-   tokio-2.0.0.crate [WARNING: MAJOR version upgrade from 1.41.0, requires approval]
-   new-crate-0.1.0.crate [WARNING: NEW dependency, requires approval]
+Found 6 missing crates:
+  serde-1.0.210.crate [minor/patch upgrade from 1.0.195]
+  tokio-2.0.0.crate [WARNING: MAJOR version upgrade from 1.41.0, requires approval]
+  old-lib-0.9.0.crate [WARNING: DOWNGRADE from 1.0.0, requires approval]
+  new-crate-0.1.0.crate [WARNING: NEW dependency, requires approval]
 
-  2 crate(s) require approval:
-   (major version upgrades or new dependencies)
+ 3 crate(s) require approval:
+   (major version upgrades, downgrades, or new dependencies)
 
-  1 crate(s) are minor/patch upgrades (no approval needed)
+ 1 crate(s) are minor/patch upgrades (no approval needed)
+
+========================================
+CRATES REQUIRING APPROVAL:
+========================================
+  - tokio-2.0.0.crate (major upgrade from 1.41.0)
+  - old-lib-0.9.0.crate (downgrade from 1.0.0)
+  - new-crate-0.1.0.crate (new dependency)
+========================================
 
 (Run with --write to add these and sort the file)
 ```

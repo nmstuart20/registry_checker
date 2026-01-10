@@ -95,7 +95,7 @@ fn main() -> Result<()> {
 
     println!("Found {} missing crates:", missing_crates.len());
 
-    let mut needs_approval: Vec<String> = Vec::new();
+    let mut needs_approval: Vec<(String, String)> = Vec::new(); // (crate, reason)
     let mut minor_upgrades: Vec<String> = Vec::new();
 
     for krate in &missing_sorted {
@@ -104,13 +104,26 @@ fn main() -> Result<()> {
                 // Find the latest existing version
                 let latest_existing = existing_versions.iter().max().unwrap();
 
-                if new_version.major != latest_existing.major {
+                if new_version < *latest_existing {
+                    // Version downgrade - needs approval
+                    println!(
+                        "  {} [WARNING: DOWNGRADE from {}, requires approval]",
+                        krate, latest_existing
+                    );
+                    needs_approval.push((
+                        krate.clone(),
+                        format!("downgrade from {}", latest_existing),
+                    ));
+                } else if new_version.major != latest_existing.major {
                     // Major version upgrade - needs approval
                     println!(
                         "  {} [WARNING: MAJOR version upgrade from {}, requires approval]",
                         krate, latest_existing
                     );
-                    needs_approval.push(krate.clone());
+                    needs_approval.push((
+                        krate.clone(),
+                        format!("major upgrade from {}", latest_existing),
+                    ));
                 } else if new_version.minor != latest_existing.minor
                     || new_version.patch != latest_existing.patch
                 {
@@ -127,19 +140,22 @@ fn main() -> Result<()> {
             } else {
                 // New dependency - needs approval
                 println!("  {} [WARNING: NEW dependency, requires approval]", krate);
-                needs_approval.push(krate.clone());
+                needs_approval.push((krate.clone(), "new dependency".to_string()));
             }
         } else {
             // Couldn't parse version
             println!("  {} [WARNING: Could not parse version]", krate);
-            needs_approval.push(krate.clone());
+            needs_approval.push((krate.clone(), "unable to parse version".to_string()));
         }
     }
 
     // Summary of what needs approval
     if !needs_approval.is_empty() {
-        println!("\n {} crate(s) require approval:", needs_approval.len());
-        println!("   (major version upgrades or new dependencies)");
+        println!(
+            "\n {} crate(s) require approval:",
+            needs_approval.len()
+        );
+        println!("   (major version upgrades, downgrades, or new dependencies)");
     }
 
     if !minor_upgrades.is_empty() {
@@ -147,6 +163,17 @@ fn main() -> Result<()> {
             "\n {} crate(s) are minor/patch upgrades (no approval needed)",
             minor_upgrades.len()
         );
+    }
+
+    // Detailed list of crates requiring approval
+    if !needs_approval.is_empty() {
+        println!("\n========================================");
+        println!("CRATES REQUIRING APPROVAL:");
+        println!("========================================");
+        for (crate_name, reason) in &needs_approval {
+            println!("  - {} ({})", crate_name, reason);
+        }
+        println!("========================================");
     }
 
     if args.write {
