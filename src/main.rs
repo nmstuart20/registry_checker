@@ -45,11 +45,25 @@ fn parse_crate_name_version(crate_file: &str) -> Option<(String, Version)> {
 
 /// Parse a line from cargo tree output to extract crate name and version
 /// Example: "serde v1.0.228" -> Some(("serde", Version(1.0.228)))
+/// Returns None for dependencies from non-crates.io registries
 fn parse_cargo_tree_line(line: &str) -> Option<(String, Version)> {
     // Remove tree characters and whitespace
     let cleaned = line
         .trim()
         .trim_start_matches(['├', '│', '└', '─', ' ']);
+
+    // Check if this dependency is from a non-crates.io registry
+    // Alternative registries show as: "crate v1.0.0 (registry `my-registry`)"
+    // or "crate v1.0.0 (registry+https://my-registry.com/...)"
+    // crates.io dependencies either have no suffix or show as:
+    // "crate v1.0.0" or "crate v1.0.0 (registry+https://github.com/rust-lang/crates.io-index)"
+    if cleaned.contains("(registry") {
+        // Check if it's NOT the crates.io registry
+        if !cleaned.contains("crates.io-index") {
+            // This is from a different registry, skip it
+            return None;
+        }
+    }
 
     // Split by space and look for "name vX.Y.Z" pattern
     let parts: Vec<&str> = cleaned.split_whitespace().collect();

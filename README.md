@@ -6,7 +6,10 @@ A simple CLI tool to find missing dependencies for offline Cargo registries.
 
 This tool uses `cargo tree` to get the exact dependencies needed for your project, then compares them against your offline registry to identify missing crates.
 
-**Key behavior:** The tool uses `cargo tree --edges normal` to get only the dependencies actually needed for building your project (excludes dev and build dependencies). It then checks if your offline registry has the exact versions needed.
+**Key behavior:**
+- Uses `cargo tree --edges normal` to get only the dependencies actually needed for building your project (excludes dev and build dependencies)
+- Only checks dependencies from crates.io (excludes dependencies from alternative registries)
+- Checks if your offline registry has the exact versions needed
 
 When dependencies are missing from the offline registry, the tool categorizes them:
 
