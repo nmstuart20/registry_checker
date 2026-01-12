@@ -64,11 +64,46 @@ fn main() -> Result<()> {
         }
     }
 
-    // Get all external dependencies (from the lock file)
+    // Get workspace members (the root packages we're actually building)
+    let workspace_members: HashSet<_> = metadata.workspace_members.iter().collect();
+
+    // Get the resolve graph - this shows which dependencies are actually used
+    let resolve = metadata
+        .resolve
+        .as_ref()
+        .context("No dependency resolution information available")?;
+
+    // Build a map of package ID to its dependencies for efficient traversal
+    let mut node_deps_map: HashMap<_, Vec<_>> = HashMap::new();
+    for node in &resolve.nodes {
+        node_deps_map.insert(
+            &node.id,
+            node.deps.iter().map(|d| &d.pkg).collect(),
+        );
+    }
+
+    // Traverse from workspace members to find all actually used packages
+    let mut actually_used_packages = HashSet::new();
+    let mut to_visit: Vec<_> = workspace_members.iter().copied().collect();
+
+    while let Some(pkg_id) = to_visit.pop() {
+        if actually_used_packages.insert(pkg_id) {
+            // If this is a new package, add its dependencies to visit
+            if let Some(deps) = node_deps_map.get(pkg_id) {
+                for dep_id in deps {
+                    if !actually_used_packages.contains(dep_id) {
+                        to_visit.push(dep_id);
+                    }
+                }
+            }
+        }
+    }
+
+    // Now only include external dependencies that are actually used
     let project_deps: HashMap<String, Version> = metadata
         .packages
         .iter()
-        .filter(|p| p.source.is_some())
+        .filter(|p| p.source.is_some() && actually_used_packages.contains(&p.id))
         .map(|p| (p.name.clone(), p.version.clone()))
         .collect();
 
