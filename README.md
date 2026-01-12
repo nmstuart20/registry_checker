@@ -4,11 +4,11 @@ A simple CLI tool to find missing dependencies for offline Cargo registries.
 
 ## What it does
 
-This tool scans your Rust project's dependencies and compares them against your offline registry file to identify which crates are truly missing.
+This tool uses `cargo tree` to get the exact dependencies needed for your project, then compares them against your offline registry to identify missing crates.
 
-**Key behavior:** The tool checks if your offline registry has *any* version that satisfies your Cargo.toml requirements, not just the exact version from the lock file. This means if your Cargo.toml specifies `crate = "1"` and your lock file has `1.5.0`, but your offline registry only has `1.3.0`, the tool will recognize that `1.3.0` satisfies the requirement and won't flag it as missing.
+**Key behavior:** The tool uses `cargo tree --edges normal` to get only the dependencies actually needed for building your project (excludes dev and build dependencies). It then checks if your offline registry has the exact versions needed.
 
-When dependencies cannot be satisfied by the offline registry, the tool categorizes them:
+When dependencies are missing from the offline registry, the tool categorizes them:
 
 - **Minor/patch version upgrades** (e.g., 1.2.0 → 1.3.0 or 1.2.0 → 1.2.1) can be added without approval
 - **Major version upgrades** (e.g., 1.x.x → 2.0.0) require approval
@@ -53,23 +53,22 @@ registry_checker -r my-registry.txt --write
 
 ### Example Output
 
-#### When offline registry can satisfy all requirements:
+#### When offline registry has all dependencies:
 ```
 Scanning project dependencies...
 Reading existing registry file: "my-registry.txt"
-All dependencies can be satisfied by the offline registry.
-(The offline registry has compatible versions for all requirements)
+All dependencies from cargo tree are in the offline registry.
 ```
 
-#### When some dependencies cannot be satisfied:
+#### When some dependencies are missing:
 ```
 Scanning project dependencies...
 Reading existing registry file: "my-registry.txt"
-Found 4 dependencies that cannot be satisfied by the offline registry:
-  serde-1.0.210.crate [requires >=1.0.200, registry has 1.0.195; minor/patch upgrade needed]
-  tokio-2.0.0.crate [WARNING: requires ^2, but registry only has 1.41.0; MAJOR upgrade needed, requires approval]
-  old-lib-0.9.0.crate [WARNING: requires ^0.9, but registry has 1.0.0; DOWNGRADE needed, requires approval]
-  new-crate-0.1.0.crate [WARNING: requires ^0.1; NEW dependency, requires approval]
+Found 4 dependencies missing from the offline registry:
+  serde-1.0.210.crate [registry has 1.0.195; minor/patch upgrade needed]
+  tokio-2.0.0.crate [WARNING: registry has 1.41.0; MAJOR upgrade needed, requires approval]
+  old-lib-0.9.0.crate [WARNING: registry has 1.0.0; DOWNGRADE needed, requires approval]
+  new-crate-0.1.0.crate [WARNING: NEW dependency, requires approval]
 
  3 crate(s) require approval:
    (major version upgrades, downgrades, or new dependencies)

@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
-use cargo_metadata::MetadataCommand;
 use clap::Parser;
-use semver::{Version, VersionReq};
+use semver::Version;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
+use std::process::Command;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -43,69 +43,73 @@ fn parse_crate_name_version(crate_file: &str) -> Option<(String, Version)> {
     Some((name.to_string(), version))
 }
 
+/// Parse a line from cargo tree output to extract crate name and version
+/// Example: "serde v1.0.228" -> Some(("serde", Version(1.0.228)))
+fn parse_cargo_tree_line(line: &str) -> Option<(String, Version)> {
+    // Remove tree characters and whitespace
+    let cleaned = line
+        .trim()
+        .trim_start_matches(|c| c == '├' || c == '│' || c == '└' || c == '─' || c == ' ');
+
+    // Split by space and look for "name vX.Y.Z" pattern
+    let parts: Vec<&str> = cleaned.split_whitespace().collect();
+    if parts.len() < 2 {
+        return None;
+    }
+
+    let name = parts[0];
+    let version_str = parts[1].trim_start_matches('v');
+
+    // Parse version (stop at additional info like "(*)" or "(proc-macro)")
+    let version_clean = version_str.split_whitespace().next()?;
+    let version = Version::parse(version_clean).ok()?;
+
+    Some((name.to_string(), version))
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
     println!("Scanning project dependencies...");
-    let metadata = MetadataCommand::new()
-        .manifest_path(&args.manifest_path)
-        .exec()
-        .context("Failed to run cargo metadata. Is this a valid Rust project?")?;
 
-    // Build a map of dependency names to their version requirements
-    // We collect all version requirements across all packages for each dependency
-    let mut dep_requirements: HashMap<String, Vec<VersionReq>> = HashMap::new();
-    for package in &metadata.packages {
-        for dep in &package.dependencies {
-            dep_requirements
-                .entry(dep.name.clone())
-                .or_default()
-                .push(dep.req.clone());
+    // Run cargo tree to get the actual dependency tree
+    let output = Command::new("cargo")
+        .arg("tree")
+        .arg("--manifest-path")
+        .arg(&args.manifest_path)
+        .arg("--edges")
+        .arg("normal")  // Only normal dependencies (not dev or build)
+        .arg("--prefix")
+        .arg("none")    // Simpler output format
+        .output()
+        .context("Failed to run cargo tree. Is cargo installed?")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("cargo tree failed: {}", stderr);
+    }
+
+    let tree_output = String::from_utf8(output.stdout)
+        .context("cargo tree output was not valid UTF-8")?;
+
+    // Parse cargo tree output to get all dependencies
+    let mut project_deps: HashMap<String, Version> = HashMap::new();
+
+    for line in tree_output.lines() {
+        if let Some((name, version)) = parse_cargo_tree_line(line) {
+            // cargo tree includes all crates, but we only want external dependencies
+            // We'll use a simple heuristic: if it appears multiple times or has a version,
+            // it's likely an external dependency. Workspace crates typically appear once at the root.
+            project_deps.insert(name, version);
         }
     }
 
-    // Get workspace members (the root packages we're actually building)
-    let workspace_members: HashSet<_> = metadata.workspace_members.iter().collect();
-
-    // Get the resolve graph - this shows which dependencies are actually used
-    let resolve = metadata
-        .resolve
-        .as_ref()
-        .context("No dependency resolution information available")?;
-
-    // Build a map of package ID to its dependencies for efficient traversal
-    let mut node_deps_map: HashMap<_, Vec<_>> = HashMap::new();
-    for node in &resolve.nodes {
-        node_deps_map.insert(
-            &node.id,
-            node.deps.iter().map(|d| &d.pkg).collect(),
-        );
+    // Remove the first entry which is usually the workspace root
+    // cargo tree shows "workspace_name v0.1.0 (path)" as the first line
+    let first_line = tree_output.lines().next().unwrap_or("");
+    if let Some((root_name, _)) = parse_cargo_tree_line(first_line) {
+        project_deps.remove(&root_name);
     }
-
-    // Traverse from workspace members to find all actually used packages
-    let mut actually_used_packages = HashSet::new();
-    let mut to_visit: Vec<_> = workspace_members.iter().copied().collect();
-
-    while let Some(pkg_id) = to_visit.pop() {
-        if actually_used_packages.insert(pkg_id) {
-            // If this is a new package, add its dependencies to visit
-            if let Some(deps) = node_deps_map.get(pkg_id) {
-                for dep_id in deps {
-                    if !actually_used_packages.contains(dep_id) {
-                        to_visit.push(dep_id);
-                    }
-                }
-            }
-        }
-    }
-
-    // Now only include external dependencies that are actually used
-    let project_deps: HashMap<String, Version> = metadata
-        .packages
-        .iter()
-        .filter(|p| p.source.is_some() && actually_used_packages.contains(&p.id))
-        .map(|p| (p.name.clone(), p.version.clone()))
-        .collect();
 
     println!("Reading existing registry file: {:?}", args.registry_file);
     let file_content =
@@ -125,41 +129,23 @@ fn main() -> Result<()> {
         }
     }
 
-    // Find what is truly missing: dependencies where the offline registry
-    // doesn't have ANY version that satisfies the version requirement
+    // Find missing dependencies: crates from cargo tree that aren't in the registry
     let mut missing_deps: HashMap<String, Version> = HashMap::new();
 
-    for (dep_name, lock_version) in &project_deps {
-        // Check if the offline registry has any version that satisfies the requirement
-        let has_satisfying_version = if let Some(requirements) = dep_requirements.get(dep_name) {
-            if let Some(available_versions) = registry_versions.get(dep_name) {
-                // Check if any available version satisfies any of the requirements
-                available_versions.iter().any(|available_version| {
-                    requirements
-                        .iter()
-                        .any(|req| req.matches(available_version))
-                })
-            } else {
-                // No versions of this crate in the registry at all
-                false
-            }
-        } else {
-            // No version requirement found (shouldn't happen, but be safe)
-            // Fall back to checking for exact version
-            registry_versions
-                .get(dep_name)
-                .map(|versions| versions.contains(lock_version))
-                .unwrap_or(false)
-        };
+    for (dep_name, needed_version) in &project_deps {
+        // Check if the registry has this exact version
+        let has_version = registry_versions
+            .get(dep_name)
+            .map(|versions| versions.contains(needed_version))
+            .unwrap_or(false);
 
-        if !has_satisfying_version {
-            missing_deps.insert(dep_name.clone(), lock_version.clone());
+        if !has_version {
+            missing_deps.insert(dep_name.clone(), needed_version.clone());
         }
     }
 
     if missing_deps.is_empty() {
-        println!("All dependencies can be satisfied by the offline registry.");
-        println!("(The offline registry has compatible versions for all requirements)");
+        println!("All dependencies from cargo tree are in the offline registry.");
         return Ok(());
     }
 
@@ -168,7 +154,7 @@ fn main() -> Result<()> {
     missing_sorted.sort_by_key(|(name, _)| *name);
 
     println!(
-        "Found {} dependencies that cannot be satisfied by the offline registry:",
+        "Found {} dependencies missing from the offline registry:",
         missing_deps.len()
     );
 
@@ -182,35 +168,21 @@ fn main() -> Result<()> {
             // Find the latest existing version
             let latest_existing = existing_versions.iter().max().unwrap();
 
-            // Get the version requirements for this dependency
-            let requirements = dep_requirements.get(*dep_name);
-            let req_str = requirements
-                .map(|reqs| {
-                    reqs.iter()
-                        .map(|r| r.to_string())
-                        .collect::<Vec<_>>()
-                        .join(" or ")
-                })
-                .unwrap_or_else(|| "unknown".to_string());
-
             if **needed_version < *latest_existing {
                 // Version downgrade - needs approval
                 println!(
-                    "  {} [WARNING: requires {}, but registry has {}; DOWNGRADE needed, requires approval]",
-                    crate_file, req_str, latest_existing
+                    "  {} [WARNING: registry has {}; DOWNGRADE needed, requires approval]",
+                    crate_file, latest_existing
                 );
                 needs_approval.push((
                     crate_file.clone(),
-                    format!(
-                        "downgrade needed (has {}, requires {})",
-                        latest_existing, req_str
-                    ),
+                    format!("downgrade from {}", latest_existing),
                 ));
             } else if needed_version.major != latest_existing.major {
                 // Major version upgrade - needs approval
                 println!(
-                    "  {} [WARNING: requires {}, but registry only has {}; MAJOR upgrade needed, requires approval]",
-                    crate_file, req_str, latest_existing
+                    "  {} [WARNING: registry has {}; MAJOR upgrade needed, requires approval]",
+                    crate_file, latest_existing
                 );
                 needs_approval.push((
                     crate_file.clone(),
@@ -221,28 +193,16 @@ fn main() -> Result<()> {
             {
                 // Minor or patch version upgrade - OK to add
                 println!(
-                    "  {} [requires {}, registry has {}; minor/patch upgrade needed]",
-                    crate_file, req_str, latest_existing
+                    "  {} [registry has {}; minor/patch upgrade needed]",
+                    crate_file, latest_existing
                 );
                 minor_upgrades.push(crate_file.clone());
-            } else {
-                // Same version? Shouldn't happen based on our logic, but just in case
-                println!("  {} [requires {}]", crate_file, req_str);
             }
         } else {
             // New dependency - needs approval
-            let req_str = dep_requirements
-                .get(*dep_name)
-                .map(|reqs| {
-                    reqs.iter()
-                        .map(|r| r.to_string())
-                        .collect::<Vec<_>>()
-                        .join(" or ")
-                })
-                .unwrap_or_else(|| "unknown".to_string());
             println!(
-                "  {} [WARNING: requires {}; NEW dependency, requires approval]",
-                crate_file, req_str
+                "  {} [WARNING: NEW dependency, requires approval]",
+                crate_file
             );
             needs_approval.push((crate_file.clone(), "new dependency".to_string()));
         }
