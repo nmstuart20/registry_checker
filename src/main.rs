@@ -49,7 +49,7 @@ fn parse_cargo_tree_line(line: &str) -> Option<(String, Version)> {
     // Remove tree characters and whitespace
     let cleaned = line
         .trim()
-        .trim_start_matches(|c| c == '├' || c == '│' || c == '└' || c == '─' || c == ' ');
+        .trim_start_matches(['├', '│', '└', '─', ' ']);
 
     // Split by space and look for "name vX.Y.Z" pattern
     let parts: Vec<&str> = cleaned.split_whitespace().collect();
@@ -78,9 +78,9 @@ fn main() -> Result<()> {
         .arg("--manifest-path")
         .arg(&args.manifest_path)
         .arg("--edges")
-        .arg("normal")  // Only normal dependencies (not dev or build)
+        .arg("normal") // Only normal dependencies (not dev or build)
         .arg("--prefix")
-        .arg("none")    // Simpler output format
+        .arg("none") // Simpler output format
         .output()
         .context("Failed to run cargo tree. Is cargo installed?")?;
 
@@ -89,8 +89,8 @@ fn main() -> Result<()> {
         anyhow::bail!("cargo tree failed: {}", stderr);
     }
 
-    let tree_output = String::from_utf8(output.stdout)
-        .context("cargo tree output was not valid UTF-8")?;
+    let tree_output =
+        String::from_utf8(output.stdout).context("cargo tree output was not valid UTF-8")?;
 
     // Parse cargo tree output to get all dependencies
     let mut project_deps: HashMap<String, Version> = HashMap::new();
