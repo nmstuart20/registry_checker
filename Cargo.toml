@@ -7,3 +7,4 @@ edition = "2024"
 clap = { version = "4.4", features = ["derive"] }
 anyhow = "1.0"
 semver = "1.0"
+toml = "0.8"

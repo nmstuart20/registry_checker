@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use semver::Version;
+use semver::{Version, VersionReq};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::process::Command;
+use toml::Value;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -25,6 +26,45 @@ struct Args {
     /// Add missing crates and sort the file
     #[arg(short, long)]
     write: bool,
+}
+
+/// Parse version requirements from a Cargo.toml file
+/// Returns a map of crate names to their version requirements
+fn parse_cargo_toml_requirements(manifest_path: &PathBuf) -> Result<HashMap<String, VersionReq>> {
+    let content = fs::read_to_string(manifest_path).context("Could not read Cargo.toml")?;
+
+    let toml_value: Value = content
+        .parse()
+        .context("Could not parse Cargo.toml as TOML")?;
+
+    let mut requirements: HashMap<String, VersionReq> = HashMap::new();
+
+    // Check all dependency sections
+    let dep_sections = ["dependencies", "dev-dependencies", "build-dependencies"];
+
+    for section in dep_sections {
+        if let Some(deps) = toml_value.get(section).and_then(|v| v.as_table()) {
+            for (name, value) in deps {
+                let version_str = match value {
+                    Value::String(s) => s.clone(),
+                    Value::Table(t) => {
+                        if let Some(Value::String(v)) = t.get("version") {
+                            v.clone()
+                        } else {
+                            continue; // Skip deps without version (git, path, etc.)
+                        }
+                    }
+                    _ => continue,
+                };
+
+                if let Ok(req) = VersionReq::parse(&version_str) {
+                    requirements.insert(name.clone(), req);
+                }
+            }
+        }
+    }
+
+    Ok(requirements)
 }
 
 /// Parse a crate filename (e.g., "serde-1.0.0.crate") into (name, version)
@@ -48,9 +88,7 @@ fn parse_crate_name_version(crate_file: &str) -> Option<(String, Version)> {
 /// Returns None for dependencies from non-crates.io registries
 fn parse_cargo_tree_line(line: &str) -> Option<(String, Version)> {
     // Remove tree characters and whitespace
-    let cleaned = line
-        .trim()
-        .trim_start_matches(['├', '│', '└', '─', ' ']);
+    let cleaned = line.trim().trim_start_matches(['├', '│', '└', '─', ' ']);
 
     // Check if this dependency is from a non-crates.io registry
     // Alternative registries show as: "crate v1.0.0 (registry `my-registry`)"
@@ -143,17 +181,32 @@ fn main() -> Result<()> {
         }
     }
 
-    // Find missing dependencies: crates from cargo tree that aren't in the registry
+    // Parse Cargo.toml to get version requirements for direct dependencies
+    println!("Parsing Cargo.toml version requirements...");
+    let cargo_requirements = parse_cargo_toml_requirements(&args.manifest_path)?;
+
+    // Find missing dependencies: crates from cargo tree where no approved version satisfies the requirement
     let mut missing_deps: HashMap<String, Version> = HashMap::new();
 
     for (dep_name, needed_version) in &project_deps {
-        // Check if the registry has this exact version
-        let has_version = registry_versions
+        // First check if there's a version requirement from Cargo.toml (direct dependency)
+        // For transitive deps, create a requirement based on the resolved version
+        let version_req = cargo_requirements
             .get(dep_name)
-            .map(|versions| versions.contains(needed_version))
+            .cloned()
+            .unwrap_or_else(|| {
+                // For transitive deps, create a caret requirement from the resolved version
+                // e.g., if cargo tree shows 1.0.95, create ^1.0.95
+                VersionReq::parse(&format!("^{}", needed_version)).unwrap_or(VersionReq::STAR)
+            });
+
+        // Check if any version in the registry satisfies the requirement
+        let has_compatible_version = registry_versions
+            .get(dep_name)
+            .map(|versions| versions.iter().any(|v| version_req.matches(v)))
             .unwrap_or(false);
 
-        if !has_version {
+        if !has_compatible_version {
             missing_deps.insert(dep_name.clone(), needed_version.clone());
         }
     }
@@ -173,45 +226,34 @@ fn main() -> Result<()> {
     );
 
     let mut needs_approval: Vec<(String, String)> = Vec::new(); // (crate, reason)
-    let mut minor_upgrades: Vec<String> = Vec::new();
 
     for (dep_name, needed_version) in &missing_sorted {
         let crate_file = format!("{}-{}.crate", dep_name, needed_version);
 
-        if let Some(existing_versions) = registry_versions.get(*dep_name) {
-            // Find the latest existing version
-            let latest_existing = existing_versions.iter().max().unwrap();
+        // Get the version requirement for display
+        let version_req = cargo_requirements
+            .get(*dep_name)
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| format!("^{}", needed_version));
 
-            if **needed_version < *latest_existing {
-                // Version downgrade - needs approval
-                println!(
-                    "  {} [WARNING: registry has {}; DOWNGRADE needed, requires approval]",
-                    crate_file, latest_existing
-                );
-                needs_approval.push((
-                    crate_file.clone(),
-                    format!("downgrade from {}", latest_existing),
-                ));
-            } else if needed_version.major != latest_existing.major {
-                // Major version upgrade - needs approval
-                println!(
-                    "  {} [WARNING: registry has {}; MAJOR upgrade needed, requires approval]",
-                    crate_file, latest_existing
-                );
-                needs_approval.push((
-                    crate_file.clone(),
-                    format!("major upgrade from {}", latest_existing),
-                ));
-            } else if needed_version.minor != latest_existing.minor
-                || needed_version.patch != latest_existing.patch
-            {
-                // Minor or patch version upgrade - OK to add
-                println!(
-                    "  {} [registry has {}; minor/patch upgrade needed]",
-                    crate_file, latest_existing
-                );
-                minor_upgrades.push(crate_file.clone());
-            }
+        if let Some(existing_versions) = registry_versions.get(*dep_name) {
+            // Registry has this crate but no version satisfies the requirement
+            let versions_str: Vec<String> =
+                existing_versions.iter().map(|v| v.to_string()).collect();
+            println!(
+                "  {} [requirement: \"{}\", registry has: {}; no compatible version]",
+                crate_file,
+                version_req,
+                versions_str.join(", ")
+            );
+            needs_approval.push((
+                crate_file.clone(),
+                format!(
+                    "requirement \"{}\" not satisfied by registry versions [{}]",
+                    version_req,
+                    versions_str.join(", ")
+                ),
+            ));
         } else {
             // New dependency - needs approval
             println!(
@@ -225,14 +267,7 @@ fn main() -> Result<()> {
     // Summary of what needs approval
     if !needs_approval.is_empty() {
         println!("\n {} crate(s) require approval:", needs_approval.len());
-        println!("   (major version upgrades, downgrades, or new dependencies)");
-    }
-
-    if !minor_upgrades.is_empty() {
-        println!(
-            "\n {} crate(s) are minor/patch upgrades (no approval needed)",
-            minor_upgrades.len()
-        );
+        println!("   (no compatible version found in registry)");
     }
 
     // Detailed list of crates requiring approval
