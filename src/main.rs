@@ -315,3 +315,192 @@ fn main() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_crate_name_version() {
+        // Basic case
+        let (name, version) = parse_crate_name_version("serde-1.0.228.crate").unwrap();
+        assert_eq!(name, "serde");
+        assert_eq!(version, Version::parse("1.0.228").unwrap());
+
+        // Crate with dashes in name
+        let (name, version) = parse_crate_name_version("proc-macro2-1.0.105.crate").unwrap();
+        assert_eq!(name, "proc-macro2");
+        assert_eq!(version, Version::parse("1.0.105").unwrap());
+
+        // Crate with underscores
+        let (name, version) = parse_crate_name_version("unicode_ident-1.0.22.crate").unwrap();
+        assert_eq!(name, "unicode_ident");
+        assert_eq!(version, Version::parse("1.0.22").unwrap());
+
+        // Invalid: no .crate extension
+        assert!(parse_crate_name_version("serde-1.0.0").is_none());
+
+        // Invalid: no version
+        assert!(parse_crate_name_version("serde.crate").is_none());
+    }
+
+    #[test]
+    fn test_parse_cargo_tree_line() {
+        // Basic case
+        let (name, version) = parse_cargo_tree_line("serde v1.0.228").unwrap();
+        assert_eq!(name, "serde");
+        assert_eq!(version, Version::parse("1.0.228").unwrap());
+
+        // With tree characters
+        let (name, version) = parse_cargo_tree_line("├── anyhow v1.0.100").unwrap();
+        assert_eq!(name, "anyhow");
+        assert_eq!(version, Version::parse("1.0.100").unwrap());
+
+        // With proc-macro marker
+        let (name, version) = parse_cargo_tree_line("clap_derive v4.5.49 (proc-macro)").unwrap();
+        assert_eq!(name, "clap_derive");
+        assert_eq!(version, Version::parse("4.5.49").unwrap());
+
+        // With duplicate marker
+        let (name, version) = parse_cargo_tree_line("proc-macro2 v1.0.105 (*)").unwrap();
+        assert_eq!(name, "proc-macro2");
+        assert_eq!(version, Version::parse("1.0.105").unwrap());
+
+        // Non-crates.io registry should be skipped
+        assert!(parse_cargo_tree_line("foo v1.0.0 (registry `my-registry`)").is_none());
+
+        // crates.io registry should work
+        let result = parse_cargo_tree_line("foo v1.0.0 (registry+https://github.com/rust-lang/crates.io-index)");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_version_req_matching() {
+        // Test that ^1.0 matches 1.8.0
+        let req = VersionReq::parse("^1.0").unwrap();
+        assert!(req.matches(&Version::parse("1.0.0").unwrap()));
+        assert!(req.matches(&Version::parse("1.8.0").unwrap()));
+        assert!(req.matches(&Version::parse("1.99.99").unwrap()));
+        assert!(!req.matches(&Version::parse("0.9.0").unwrap()));
+        assert!(!req.matches(&Version::parse("2.0.0").unwrap()));
+
+        // Test that ^1.1.1 matches 1.1.8
+        let req = VersionReq::parse("^1.1.1").unwrap();
+        assert!(req.matches(&Version::parse("1.1.1").unwrap()));
+        assert!(req.matches(&Version::parse("1.1.8").unwrap()));
+        assert!(req.matches(&Version::parse("1.2.0").unwrap()));
+        assert!(!req.matches(&Version::parse("1.1.0").unwrap()));
+        assert!(!req.matches(&Version::parse("1.0.0").unwrap()));
+
+        // Test that ^4.4 matches 4.5.54
+        let req = VersionReq::parse("^4.4").unwrap();
+        assert!(req.matches(&Version::parse("4.4.0").unwrap()));
+        assert!(req.matches(&Version::parse("4.5.54").unwrap()));
+        assert!(!req.matches(&Version::parse("4.3.0").unwrap()));
+        assert!(!req.matches(&Version::parse("5.0.0").unwrap()));
+    }
+
+    #[test]
+    fn test_registry_file_parsing() {
+        let registry_content = std::fs::read_to_string("example_registry.txt")
+            .expect("example_registry.txt should exist");
+
+        let mut registry_versions: HashMap<String, Vec<Version>> = HashMap::new();
+        for line in registry_content.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some((name, version)) = parse_crate_name_version(line) {
+                registry_versions.entry(name).or_default().push(version);
+            }
+        }
+
+        // Check some expected crates are present
+        assert!(registry_versions.contains_key("anyhow"));
+        assert!(registry_versions.contains_key("clap"));
+        assert!(registry_versions.contains_key("semver"));
+        assert!(registry_versions.contains_key("toml"));
+
+        // Check versions
+        assert!(registry_versions["anyhow"].contains(&Version::parse("1.0.100").unwrap()));
+        assert!(registry_versions["clap"].contains(&Version::parse("4.5.54").unwrap()));
+    }
+
+    #[test]
+    fn test_higher_version_satisfies_requirement() {
+        // Simulates: Cargo.toml has anyhow = "1.0", registry has anyhow-1.8.0
+        let registry_content = std::fs::read_to_string("example_registry_higher.txt")
+            .expect("example_registry_higher.txt should exist");
+
+        let mut registry_versions: HashMap<String, Vec<Version>> = HashMap::new();
+        for line in registry_content.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some((name, version)) = parse_crate_name_version(line) {
+                registry_versions.entry(name).or_default().push(version);
+            }
+        }
+
+        // anyhow in registry is 1.8.0
+        assert!(registry_versions["anyhow"].contains(&Version::parse("1.8.0").unwrap()));
+
+        // Requirement from Cargo.toml is ^1.0
+        let req = VersionReq::parse("^1.0").unwrap();
+
+        // 1.8.0 should satisfy ^1.0
+        let has_compatible = registry_versions["anyhow"]
+            .iter()
+            .any(|v| req.matches(v));
+        assert!(has_compatible, "anyhow 1.8.0 should satisfy ^1.0");
+    }
+
+    #[test]
+    fn test_lower_version_fails_requirement() {
+        // Simulates: Cargo.toml has anyhow = "1.0", registry has anyhow-0.9.0
+        let registry_content = std::fs::read_to_string("example_registry_fail.txt")
+            .expect("example_registry_fail.txt should exist");
+
+        let mut registry_versions: HashMap<String, Vec<Version>> = HashMap::new();
+        for line in registry_content.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some((name, version)) = parse_crate_name_version(line) {
+                registry_versions.entry(name).or_default().push(version);
+            }
+        }
+
+        // anyhow in registry is 0.9.0
+        assert!(registry_versions["anyhow"].contains(&Version::parse("0.9.0").unwrap()));
+
+        // Requirement from Cargo.toml is ^1.0
+        let req = VersionReq::parse("^1.0").unwrap();
+
+        // 0.9.0 should NOT satisfy ^1.0
+        let has_compatible = registry_versions["anyhow"]
+            .iter()
+            .any(|v| req.matches(v));
+        assert!(!has_compatible, "anyhow 0.9.0 should NOT satisfy ^1.0");
+    }
+
+    #[test]
+    fn test_parse_cargo_toml_requirements() {
+        let requirements = parse_cargo_toml_requirements(&PathBuf::from("Cargo.toml"))
+            .expect("Should parse Cargo.toml");
+
+        // Check direct dependencies from this project's Cargo.toml
+        assert!(requirements.contains_key("clap"));
+        assert!(requirements.contains_key("anyhow"));
+        assert!(requirements.contains_key("semver"));
+        assert!(requirements.contains_key("toml"));
+
+        // Verify the requirements match what's in Cargo.toml
+        assert_eq!(requirements["anyhow"].to_string(), "^1.0");
+        assert_eq!(requirements["semver"].to_string(), "^1.0");
+        assert_eq!(requirements["toml"].to_string(), "^0.8");
+    }
+}

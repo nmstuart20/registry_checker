@@ -2,14 +2,14 @@ anstream-0.6.21.crate
 anstyle-1.0.13.crate
 anstyle-parse-0.2.7.crate
 anstyle-query-1.1.5.crate
-anyhow-1.0.101.crate
+anyhow-0.9.0.crate
 clap-4.5.54.crate
 clap_builder-4.5.54.crate
 clap_derive-4.5.49.crate
 clap_lex-0.7.6.crate
 colorchoice-1.0.4.crate
 equivalent-1.0.2.crate
-hashbrown-0.2.1.crate
+hashbrown-0.16.1.crate
 heck-0.5.0.crate
 indexmap-2.13.0.crate
 is_terminal_polyfill-1.70.2.crate
