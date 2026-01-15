@@ -370,7 +370,9 @@ mod tests {
         assert!(parse_cargo_tree_line("foo v1.0.0 (registry `my-registry`)").is_none());
 
         // crates.io registry should work
-        let result = parse_cargo_tree_line("foo v1.0.0 (registry+https://github.com/rust-lang/crates.io-index)");
+        let result = parse_cargo_tree_line(
+            "foo v1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+        );
         assert!(result.is_some());
     }
 
@@ -451,9 +453,7 @@ mod tests {
         let req = VersionReq::parse("^1.0").unwrap();
 
         // 1.8.0 should satisfy ^1.0
-        let has_compatible = registry_versions["anyhow"]
-            .iter()
-            .any(|v| req.matches(v));
+        let has_compatible = registry_versions["anyhow"].iter().any(|v| req.matches(v));
         assert!(has_compatible, "anyhow 1.8.0 should satisfy ^1.0");
     }
 
@@ -481,9 +481,7 @@ mod tests {
         let req = VersionReq::parse("^1.0").unwrap();
 
         // 0.9.0 should NOT satisfy ^1.0
-        let has_compatible = registry_versions["anyhow"]
-            .iter()
-            .any(|v| req.matches(v));
+        let has_compatible = registry_versions["anyhow"].iter().any(|v| req.matches(v));
         assert!(!has_compatible, "anyhow 0.9.0 should NOT satisfy ^1.0");
     }
 
